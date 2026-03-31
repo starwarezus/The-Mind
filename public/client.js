@@ -11,7 +11,7 @@
   function makeStars(n) {
     stars = Array.from({ length: n }, () => ({
       x: Math.random() * canvas.width, y: Math.random() * canvas.height,
-      r: Math.random() * 1.3 + 0.2, a: Math.random() * Math.PI * 2,
+      r: Math.random() * 1.3 + 0.2,   a: Math.random() * Math.PI * 2,
       speed: Math.random() * 0.005 + 0.001,
     }));
   }
@@ -41,7 +41,8 @@ let myRoomCode        = null;
 let isHost            = false;
 let selectedCard      = null;
 let countdownInterval = null;
-let levelTimerInterval = null;
+let levelTimerInterval= null;
+let wrongPopupTimeout = null;
 let pendingStartLevel = 1;
 let chooseLevelVal    = 1;
 let prevPlayedCount   = 0;
@@ -55,6 +56,7 @@ const screens = ['landing', 'choose', 'lobby', 'game'];
 function showScreen(name) {
   screens.forEach(s => $('screen-' + s).classList.toggle('hidden', s !== name));
   $('rabbit-bg').classList.toggle('visible', name === 'game');
+  if (name !== 'game') closeMobPanel();
 }
 function setOverlay(name) {
   ['pause', 'level', 'gameover', 'won'].forEach(n =>
@@ -62,61 +64,132 @@ function setOverlay(name) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  GAME EVENT LOG  (game events only)
+//  RESET CHAT + LOG
 // ══════════════════════════════════════════════════════════════
-function log(msg, type = 'play') {
-  const el = $('log-entries');
-  if (!el) return;
-  const entry = document.createElement('div');
-  entry.className = `log-entry ${type}`;
-  const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  entry.innerHTML = `${msg}<span class="log-ts">${ts}</span>`;
-  el.appendChild(entry);
-  el.scrollTop = el.scrollHeight;
-  while (el.children.length > 120) el.removeChild(el.firstChild);
+function resetChatAndLog() {
+  ['chat-messages','log-entries','mob-chat-messages','mob-log-entries'].forEach(id => {
+    const el = $(id);
+    if (el) el.innerHTML = '';
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
-//  CHAT PANEL
+//  WRONG CARD POPUP
+// ══════════════════════════════════════════════════════════════
+function showWrongCardPopup(evt) {
+  const popup = $('wrong-card-popup');
+  if (!popup) return;
+
+  // Build body text
+  let body = '';
+  if (evt.lowerCards && evt.lowerCards.length > 0) {
+    const who = evt.lowerCards.map(c => `${c.playerName} had ${c.card}.`).join(' · ');
+    body = who;
+  } else {
+    body = 'A lower card was still in play!';
+  }
+  $('wcp-body').textContent = body;
+  $('wcp-lives').textContent = evt.lives > 0
+    ? `♥ ${evt.lives} live${evt.lives !== 1 ? 's' : ''} remaining`
+    : '♥ No lives left!';
+
+  // Clear any existing timeout
+  if (wrongPopupTimeout) { clearTimeout(wrongPopupTimeout); wrongPopupTimeout = null; }
+  popup.classList.remove('hide');
+  popup.classList.add('show');
+
+  wrongPopupTimeout = setTimeout(() => {
+    popup.classList.remove('show');
+    popup.classList.add('hide');
+    wrongPopupTimeout = setTimeout(() => popup.classList.remove('hide'), 300);
+  }, 2800);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  EVENT LOG  (game events only, mirrored to mobile panel)
+// ══════════════════════════════════════════════════════════════
+function log(msg, type = 'play') {
+  const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  ['log-entries', 'mob-log-entries'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    const entry = document.createElement('div');
+    entry.className = `log-entry ${type}`;
+    entry.innerHTML = `${msg}<span class="log-ts">${ts}</span>`;
+    el.appendChild(entry);
+    el.scrollTop = el.scrollHeight;
+    while (el.children.length > 120) el.removeChild(el.firstChild);
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+//  CHAT (mirrored to mobile panel)
 // ══════════════════════════════════════════════════════════════
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function appendChat({ name, text, ts, isMe }) {
-  const el = $('chat-messages');
-  if (!el) return;
-  const msg = document.createElement('div');
-  msg.className = 'chat-msg' + (isMe ? ' mine' : '');
-  const t = new Date(ts);
-  const timeStr = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  msg.innerHTML =
+function appendChatMsg({ name, text, ts, isMe }) {
+  const timeStr = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const html =
     `<span class="chat-name${isMe ? ' me' : ''}">${escHtml(name)}</span>` +
     `<span class="chat-text">${escHtml(text)}</span>` +
     `<span class="chat-ts">${timeStr}</span>`;
-  el.appendChild(msg);
-  el.scrollTop = el.scrollHeight;
-  while (el.children.length > 200) el.removeChild(el.firstChild);
+
+  ['chat-messages', 'mob-chat-messages'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    const msg = document.createElement('div');
+    msg.className = 'chat-msg' + (isMe ? ' mine' : '');
+    msg.innerHTML = html;
+    el.appendChild(msg);
+    el.scrollTop = el.scrollHeight;
+    while (el.children.length > 200) el.removeChild(el.firstChild);
+  });
 }
 
 function sendChat() {
-  const input = $('chat-input');
-  const text  = (input.value || '').trim();
+  const inputs = ['chat-input', 'mob-chat-input'];
+  let text = '';
+  for (const id of inputs) {
+    const el = $(id);
+    if (el && el.value.trim()) { text = el.value.trim(); el.value = ''; break; }
+  }
   if (!text || !socket) return;
   socket.emit('chat_msg', { text });
-  input.value = '';
+}
+
+// ══════════════════════════════════════════════════════════════
+//  MOBILE PANEL NAV
+// ══════════════════════════════════════════════════════════════
+let activeMobPanel = null;
+
+function openMobPanel(panelId) {
+  closeMobPanel();
+  if (!panelId || panelId === 'none') return;
+  const panel = $(panelId);
+  if (panel) { panel.classList.add('open'); activeMobPanel = panelId; }
+  // update tab states
+  document.querySelectorAll('.mob-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.panel === panelId);
+  });
+  $('tab-game').classList.toggle('active', !panelId || panelId === 'none');
+}
+
+function closeMobPanel() {
+  if (activeMobPanel) { const p = $(activeMobPanel); if (p) p.classList.remove('open'); }
+  activeMobPanel = null;
+  document.querySelectorAll('.mob-tab').forEach(t => t.classList.remove('active'));
+  $('tab-game') && $('tab-game').classList.add('active');
 }
 
 // ══════════════════════════════════════════════════════════════
 //  CARD BUILDER
-//  Matches real The Mind card: nearly-black face,
-//  white radial starburst, bold black Cinzel number + period
 // ══════════════════════════════════════════════════════════════
 function buildCard({ number, back = false, w = 68, h = 102, extraClasses = [] }) {
   const card = document.createElement('div');
   card.className = ['card', ...extraClasses].join(' ');
-  card.style.width  = w + 'px';
-  card.style.height = h + 'px';
+  card.style.width = w + 'px'; card.style.height = h + 'px';
 
   if (back) {
     const face = document.createElement('div');
@@ -127,33 +200,24 @@ function buildCard({ number, back = false, w = 68, h = 102, extraClasses = [] })
     orb.style.cssText = `width:${orbSz}px;height:${orbSz}px;top:45%;left:50%;transform:translate(-50%,-50%);position:absolute`;
     face.appendChild(orb);
     const txt = document.createElement('div');
-    txt.className = 'card-back-txt';
-    txt.textContent = 'THE MIND';
+    txt.className = 'card-back-txt'; txt.textContent = 'THE MIND';
     face.appendChild(txt);
     card.appendChild(face);
   } else {
     const face = document.createElement('div');
     face.className = 'card-face';
-
-    // white starburst
     const burstSz = Math.round(w * 0.82);
     const burst   = document.createElement('div');
     burst.className = 'card-burst';
-    burst.style.width  = burstSz + 'px';
-    burst.style.height = burstSz + 'px';
+    burst.style.width = burstSz + 'px'; burst.style.height = burstSz + 'px';
     face.appendChild(burst);
-
-    // number with period
     const numEl = document.createElement('div');
     numEl.className = 'card-num';
-    numEl.style.fontSize = w <= 42 ? '1.05rem' : w <= 58 ? '1.5rem' : w <= 78 ? '2.1rem' : '2.8rem';
+    numEl.style.fontSize = w <= 42 ? '1.05rem' : w <= 55 ? '1.45rem' : w <= 70 ? '1.9rem' : '2.5rem';
     const inner = document.createElement('span');
-    inner.className = 'card-num-inner';
-    inner.textContent = number;
+    inner.className = 'card-num-inner'; inner.textContent = number;
     numEl.appendChild(inner);
     face.appendChild(numEl);
-
-    // corner pips
     const cfs = Math.max(7, Math.round(w * 0.12)) + 'px';
     const tl  = document.createElement('div');
     tl.className = 'card-corner tl'; tl.style.fontSize = cfs; tl.textContent = number;
@@ -161,7 +225,6 @@ function buildCard({ number, back = false, w = 68, h = 102, extraClasses = [] })
     const br  = document.createElement('div');
     br.className = 'card-corner br'; br.style.fontSize = cfs; br.textContent = number;
     face.appendChild(br);
-
     card.appendChild(face);
   }
   return card;
@@ -170,25 +233,18 @@ function buildCard({ number, back = false, w = 68, h = 102, extraClasses = [] })
 // ══════════════════════════════════════════════════════════════
 //  SEAT POSITIONS
 // ══════════════════════════════════════════════════════════════
-const SEATS = {
-  1: ['top'],
-  2: ['top-left', 'top-right'],
-  3: ['top-left', 'top', 'top-right'],
-  4: ['top-left', 'top', 'top-right', 'left'],
-  5: ['top-left', 'top', 'top-right', 'left', 'right'],
-};
+const SEATS = { 1:['top'], 2:['top-left','top-right'], 3:['top-left','top','top-right'],
+  4:['top-left','top','top-right','left'], 5:['top-left','top','top-right','left','right'] };
 
 function renderSeats(state) {
   document.querySelectorAll('.seat').forEach(el => el.remove());
   const opponents = state.players.filter(p => p.id !== socket.id);
   const positions = SEATS[Math.min(opponents.length, 5)] || [];
-
   opponents.forEach((p, idx) => {
     const pos  = positions[idx] || 'top';
     const seat = document.createElement('div');
     seat.className = 'seat'; seat.dataset.pos = pos;
     if (p.connected === false) seat.classList.add('disconnected');
-
     const nameEl = document.createElement('div');
     nameEl.className = 'seat-name';
     nameEl.innerHTML =
@@ -196,27 +252,21 @@ function renderSeats(state) {
       escHtml(p.name) +
       (state.starVotes.includes(p.id)  ? ' <span class="voted-star-icon">★</span>' : '') +
       (state.readyVotes.includes(p.id) ? ' <span class="ready-icon">✓</span>'      : '');
-
     const cardsEl = document.createElement('div');
     cardsEl.className = 'seat-cards';
     const count = p.cardCount || 0;
-    const show  = Math.min(count, 5);
-    for (let i = 0; i < show; i++) {
+    for (let i = 0; i < Math.min(count, 5); i++) {
       const fc = buildCard({ back: true, w: 38, h: 57 });
-      fc.classList.add('fd-card');
-      cardsEl.appendChild(fc);
+      fc.classList.add('fd-card'); cardsEl.appendChild(fc);
     }
     if (count > 0) {
       const badge = document.createElement('div');
-      badge.className = 'fd-badge'; badge.textContent = count;
-      cardsEl.appendChild(badge);
+      badge.className = 'fd-badge'; badge.textContent = count; cardsEl.appendChild(badge);
     } else {
       const empty = document.createElement('div');
       empty.style.cssText = 'font-size:.65rem;color:var(--muted);font-style:italic';
-      empty.textContent = 'done';
-      cardsEl.appendChild(empty);
+      empty.textContent = 'done'; cardsEl.appendChild(empty);
     }
-
     if (pos.startsWith('bottom')) { seat.appendChild(cardsEl); seat.appendChild(nameEl); }
     else                          { seat.appendChild(nameEl);  seat.appendChild(cardsEl); }
     $('g-table').appendChild(seat);
@@ -227,24 +277,15 @@ function renderSeats(state) {
 //  RENDER PILE
 // ══════════════════════════════════════════════════════════════
 function renderPile(state) {
-  const slot = $('pile-top-card');
-  const lbl  = $('pile-lbl');
-  const cnt  = $('pile-cnt');
+  const slot = $('pile-top-card'), lbl = $('pile-lbl'), cnt = $('pile-cnt');
   slot.innerHTML = '';
   const played = state.playedCards || [];
-
-  if (played.length === 0) {
-    lbl.textContent = 'Waiting for first card…';
-    cnt.textContent = '';
-    return;
-  }
+  if (!played.length) { lbl.textContent = 'Waiting for first card…'; cnt.textContent = ''; return; }
   const last    = played[played.length - 1];
-  const topCard = buildCard({ number: last.card, w: 82, h: 123 });
+  const topCard = buildCard({ number: last.card, w: 78, h: 117 });
   if (played.length > prevPlayedCount) topCard.classList.add('flash');
   slot.appendChild(topCard);
-
-  const tag = last.star ? ' ⭐' : last.forced ? ' 💀' : '';
-  lbl.textContent = `${last.playerName}${tag}`;
+  lbl.textContent = `${last.playerName}${last.star ? ' ⭐' : last.forced ? ' 💀' : ''}`;
   cnt.textContent = played.length > 1 ? `${played.length} cards played` : '';
 }
 
@@ -252,25 +293,22 @@ function renderPile(state) {
 //  RENDER HAND
 // ══════════════════════════════════════════════════════════════
 function renderHand() {
-  const container = $('g-hand');
-  const hint      = $('play-hint');
+  const container = $('g-hand'), hint = $('play-hint');
   container.innerHTML = '';
-
-  if (!myHand || myHand.length === 0) {
-    hint.textContent = 'No cards remaining';
-    return;
-  }
+  if (!myHand || !myHand.length) { hint.textContent = 'No cards remaining'; return; }
+  // responsive card width
+  const isMobile = window.innerWidth <= 600;
+  const cardW = isMobile ? 52 : 60;
+  const cardH = Math.round(cardW * 1.5);
   myHand.forEach((card, idx) => {
     const classes = ['playable'];
     if (idx === 0)             classes.push('is-lowest');
     if (card === selectedCard) classes.push('selected');
-    const el = buildCard({ number: card, w: 58, h: 87, extraClasses: classes });
+    const el = buildCard({ number: card, w: cardW, h: cardH, extraClasses: classes });
     el.addEventListener('click', () => onCardClick(card));
     container.appendChild(el);
   });
-  hint.textContent = selectedCard !== null
-    ? `▲ Tap ${selectedCard}. again to confirm play`
-    : 'Green burst = your lowest card';
+  hint.textContent = selectedCard !== null ? `▲ Tap ${selectedCard}. again to confirm` : 'Green burst = your lowest card';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -295,18 +333,14 @@ function applyLobby(state) {
   pendingStartLevel = state.startLevel;
   $('lobby-level-controls').style.display = isHost ? 'block' : 'none';
   $('lobby-host-controls').style.display  = isHost ? 'block' : 'none';
-
-  const startBtn       = $('btn-start');
+  const startBtn = $('btn-start');
   startBtn.disabled    = state.players.length < 2;
   startBtn.textContent = state.players.length < 2
     ? `Waiting for players… (${state.players.length}/2 min)`
     : `✦ Start Game (${state.players.length} players)`;
-
-  const list = $('lobby-players');
-  list.innerHTML = '';
+  const list = $('lobby-players'); list.innerHTML = '';
   state.players.forEach(p => {
-    const chip = document.createElement('div');
-    chip.className = 'player-chip';
+    const chip = document.createElement('div'); chip.className = 'player-chip';
     chip.innerHTML =
       `<div class="p-dot${p.connected === false ? ' off' : ''}"></div>` +
       (p.id === state.hostId ? '<span title="host">👑</span>' : '') +
@@ -320,20 +354,15 @@ function applyPlaying(state) {
   $('g-level').textContent = state.level;
   $('g-lives').textContent = state.lives;
   $('g-stars').textContent = state.stars;
-
-  const myVoted       = state.starVotes.includes(socket.id);
-  const starBtn       = $('btn-star');
+  const myVoted = state.starVotes.includes(socket.id);
+  const starBtn = $('btn-star');
   starBtn.disabled    = myVoted || state.stars <= 0;
   starBtn.textContent = state.stars <= 0 ? '★ No Stars' : myVoted ? '★ Voted…' : '★ Throw Star';
-
   const vbar = $('star-vote-bar');
   if (state.starVotes.length > 0) {
     vbar.style.display = 'block';
-    vbar.textContent   = `★ ${state.starVotes.length}/${state.players.length} voting to throw a star — needs all players`;
-  } else {
-    vbar.style.display = 'none';
-  }
-
+    vbar.textContent = `★ ${state.starVotes.length}/${state.players.length} voting to throw a star — needs all players`;
+  } else { vbar.style.display = 'none'; }
   renderSeats(state);
   renderPile(state);
   prevPlayedCount = (state.playedCards || []).length;
@@ -364,11 +393,12 @@ function applyGameOver() { showScreen('game'); setOverlay('gameover'); clearCoun
 function applyWon()       { showScreen('game'); setOverlay('won');      clearCountdown(); clearLevelTimer(); }
 
 // ══════════════════════════════════════════════════════════════
-//  CARD EVENTS → LOG
+//  CARD EVENTS
 // ══════════════════════════════════════════════════════════════
 function handleCardEvent(evt) {
   switch (evt.type) {
     case 'life_lost':
+      showWrongCardPopup(evt);
       log(`💀 Wrong card! ${evt.lives} live${evt.lives !== 1 ? 's' : ''} remaining.`, 'danger');
       if (evt.lowerCards?.length) {
         const who = evt.lowerCards.map(c => `${c.playerName} (${c.card}.)`).join(', ');
@@ -398,43 +428,29 @@ function onCardClick(card) {
     socket.emit('play_card', { card });
     log(`You played ${card}.`, 'play');
     selectedCard = null;
-  } else {
-    selectedCard = card;
-  }
+  } else { selectedCard = card; }
   renderHand();
 }
 
 // ══════════════════════════════════════════════════════════════
-//  COUNTDOWN
+//  TIMERS
 // ══════════════════════════════════════════════════════════════
 function startCountdown(secs) {
   clearCountdown();
-  let rem = secs;
-  $('countdown').textContent = rem;
+  let rem = secs; $('countdown').textContent = rem;
   countdownInterval = setInterval(() => { $('countdown').textContent = --rem; if (rem <= 0) clearCountdown(); }, 1000);
 }
-function clearCountdown() {
-  if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
-}
+function clearCountdown() { if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; } }
 
 function startLevelTimer(secs) {
   clearLevelTimer();
-  let rem = secs;
-  $('lc-timer-secs').textContent = rem;
-  $('lc-timer').style.display = 'block';
+  let rem = secs; $('lc-timer-secs').textContent = rem; $('lc-timer').style.display = 'block';
   levelTimerInterval = setInterval(() => {
-    rem--;
-    $('lc-timer-secs').textContent = rem;
-    if (rem <= 0) {
-      clearLevelTimer();
-      // auto-fire ready if not already voted
-      if (!$('btn-ready').disabled) $('btn-ready').click();
-    }
+    $('lc-timer-secs').textContent = --rem;
+    if (rem <= 0) { clearLevelTimer(); if (!$('btn-ready').disabled) $('btn-ready').click(); }
   }, 1000);
 }
-function clearLevelTimer() {
-  if (levelTimerInterval) { clearInterval(levelTimerInterval); levelTimerInterval = null; }
-}
+function clearLevelTimer() { if (levelTimerInterval) { clearInterval(levelTimerInterval); levelTimerInterval = null; } }
 
 // ══════════════════════════════════════════════════════════════
 //  SOCKET
@@ -442,13 +458,18 @@ function clearLevelTimer() {
 function connectSocket() {
   socket = io();
   socket.on('connect', () => console.log('connected', socket.id));
+  socket.on('error', ({ msg }) => { $('join-error').textContent = msg; $('start-error').textContent = msg; });
 
-  socket.on('error', ({ msg }) => {
-    $('join-error').textContent  = msg;
-    $('start-error').textContent = msg;
+  socket.on('room_created', ({ roomCode }) => {
+    myRoomCode = roomCode; isHost = true;
+    resetChatAndLog();      // ← reset on new room
+    showScreen('lobby');
   });
-  socket.on('room_created', ({ roomCode }) => { myRoomCode = roomCode; isHost = true; showScreen('lobby'); });
-  socket.on('room_joined',  ({ roomCode }) => { myRoomCode = roomCode; showScreen('lobby'); });
+  socket.on('room_joined', ({ roomCode }) => {
+    myRoomCode = roomCode;
+    resetChatAndLog();      // ← reset on join
+    showScreen('lobby');
+  });
 
   socket.on('your_hand', (hand) => {
     myHand = hand;
@@ -459,8 +480,7 @@ function connectSocket() {
   socket.on('room_update', (state) => {
     const prevPhase  = gameState?.phase;
     const prevPlayed = gameState?.playedCards?.length ?? 0;
-    gameState = state;
-    isHost    = state.hostId === socket.id;
+    gameState = state; isHost = state.hostId === socket.id;
 
     if (prevPhase !== state.phase) {
       if      (state.phase === 'playing' && prevPhase === 'lobby')        log(`— Level ${state.level} begins. ${state.players.length} players. —`, 'system');
@@ -472,7 +492,6 @@ function connectSocket() {
       else if (state.phase === 'won')                                     log('— All levels complete. ONE MIND. —', 'success');
     }
 
-    // log other players' card plays
     if (state.phase === 'playing' && (state.playedCards?.length ?? 0) > prevPlayed) {
       const last = state.playedCards[state.playedCards.length - 1];
       if (last && last.playerId !== socket.id && !last.forced && !last.star)
@@ -483,7 +502,8 @@ function connectSocket() {
   });
 
   socket.on('card_event', handleCardEvent);
-  socket.on('chat_msg', ({ name, text, ts }) => appendChat({ name, text, ts, isMe: name === myName }));
+  socket.on('chat_msg', ({ name, text, ts }) =>
+    appendChatMsg({ name, text, ts, isMe: name === myName }));
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -530,21 +550,34 @@ $('btn-ready').addEventListener('click', () => {
   socket.emit('ready_next');
   $('btn-ready').disabled = true; $('btn-ready').textContent = '✓ Waiting for others…';
 });
-$('btn-exit').addEventListener('click', () => {
-  if (!confirm('Exit to main menu? You will leave the game.')) return;
-  resetAndGoHome();
-});
+$('btn-exit').addEventListener('click', () => { if (!confirm('Exit to main menu?')) return; resetAndGoHome(); });
+$('btn-exit-level').addEventListener('click', () => { if (!confirm('Exit to main menu?')) return; resetAndGoHome(); });
+
 function resetAndGoHome() {
   myHand = []; gameState = null; myRoomCode = null; isHost = false; selectedCard = null;
-  clearLevelTimer();
+  clearLevelTimer(); clearCountdown();
   if (socket) { socket.disconnect(); socket = null; }
   showScreen('landing'); setOverlay(null);
 }
 $('btn-play-again').addEventListener('click',     resetAndGoHome);
 $('btn-play-again-won').addEventListener('click', resetAndGoHome);
-$('btn-exit-level').addEventListener('click', () => {
-  if (!confirm('Exit to main menu? You will leave the game.')) return;
-  resetAndGoHome();
-});
+
+// chat
 $('chat-send').addEventListener('click', sendChat);
 $('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+$('mob-chat-send').addEventListener('click', sendChat);
+$('mob-chat-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+// mobile nav tabs
+document.querySelectorAll('.mob-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const panelId = tab.dataset.panel;
+    if (activeMobPanel === panelId) { closeMobPanel(); }
+    else { openMobPanel(panelId === 'none' ? null : panelId); }
+  });
+});
+$('mob-chat-close').addEventListener('click', closeMobPanel);
+$('mob-log-close').addEventListener('click',  closeMobPanel);
+
+// re-render hand on resize (card size changes)
+window.addEventListener('resize', () => { if (gameState?.phase === 'playing') renderHand(); });
