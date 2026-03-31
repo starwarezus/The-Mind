@@ -196,6 +196,23 @@ io.on('connection', (socket) => {
     broadcast(info.roomCode);
   });
 
+  // ── CHAT ─────────────────────────────────────────────────────
+  socket.on('chat_msg', ({ text }) => {
+    const info = socketToRoom.get(socket.id);
+    if (!info) return;
+    const game = rooms.get(info.roomCode);
+    if (!game) return;
+    const player = game.players.find(p => p.id === socket.id);
+    if (!player) return;
+    const clean = String(text).trim().slice(0, 200);
+    if (!clean) return;
+    io.to(info.roomCode).emit('chat_msg', {
+      name: player.name,
+      text: clean,
+      ts: Date.now(),
+    });
+  });
+
   // ── DISCONNECT ───────────────────────────────────────────────
   socket.on('disconnect', () => {
     const info = socketToRoom.get(socket.id);
