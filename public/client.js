@@ -41,6 +41,7 @@ let myRoomCode        = null;
 let isHost            = false;
 let selectedCard      = null;
 let countdownInterval = null;
+let levelTimerInterval = null;
 let pendingStartLevel = 1;
 let chooseLevelVal    = 1;
 let prevPlayedCount   = 0;
@@ -263,7 +264,7 @@ function renderHand() {
     const classes = ['playable'];
     if (idx === 0)             classes.push('is-lowest');
     if (card === selectedCard) classes.push('selected');
-    const el = buildCard({ number: card, w: 70, h: 105, extraClasses: classes });
+    const el = buildCard({ number: card, w: 58, h: 87, extraClasses: classes });
     el.addEventListener('click', () => onCardClick(card));
     container.appendChild(el);
   });
@@ -315,7 +316,7 @@ function applyLobby(state) {
 }
 
 function applyPlaying(state) {
-  showScreen('game'); setOverlay(null); clearCountdown();
+  showScreen('game'); setOverlay(null); clearCountdown(); clearLevelTimer();
   $('g-level').textContent = state.level;
   $('g-lives').textContent = state.lives;
   $('g-stars').textContent = state.stars;
@@ -352,14 +353,15 @@ function applyLevelComplete(state) {
   if ([3,6,9].includes(state.level + 1)) bonus.push('+1 life');
   if ([5,10].includes(state.level + 1))  bonus.push('+1 star');
   $('lc-sub').textContent = bonus.length ? `Next level bonus: ${bonus.join(', ')}!` : 'You read each other perfectly.';
-  const myReady           = state.readyVotes.includes(socket.id);
+  const myReady = state.readyVotes.includes(socket.id);
   $('btn-ready').disabled    = myReady;
   $('btn-ready').textContent = myReady ? '✓ Waiting for others…' : '✓ Ready for Next';
   $('ready-status').textContent = `${state.readyVotes.length}/${state.players.length} ready`;
+  startLevelTimer(60);
 }
 
-function applyGameOver() { showScreen('game'); setOverlay('gameover'); clearCountdown(); }
-function applyWon()       { showScreen('game'); setOverlay('won');      clearCountdown(); }
+function applyGameOver() { showScreen('game'); setOverlay('gameover'); clearCountdown(); clearLevelTimer(); }
+function applyWon()       { showScreen('game'); setOverlay('won');      clearCountdown(); clearLevelTimer(); }
 
 // ══════════════════════════════════════════════════════════════
 //  CARD EVENTS → LOG
@@ -413,6 +415,25 @@ function startCountdown(secs) {
 }
 function clearCountdown() {
   if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+}
+
+function startLevelTimer(secs) {
+  clearLevelTimer();
+  let rem = secs;
+  $('lc-timer-secs').textContent = rem;
+  $('lc-timer').style.display = 'block';
+  levelTimerInterval = setInterval(() => {
+    rem--;
+    $('lc-timer-secs').textContent = rem;
+    if (rem <= 0) {
+      clearLevelTimer();
+      // auto-fire ready if not already voted
+      if (!$('btn-ready').disabled) $('btn-ready').click();
+    }
+  }, 1000);
+}
+function clearLevelTimer() {
+  if (levelTimerInterval) { clearInterval(levelTimerInterval); levelTimerInterval = null; }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -515,10 +536,15 @@ $('btn-exit').addEventListener('click', () => {
 });
 function resetAndGoHome() {
   myHand = []; gameState = null; myRoomCode = null; isHost = false; selectedCard = null;
+  clearLevelTimer();
   if (socket) { socket.disconnect(); socket = null; }
   showScreen('landing'); setOverlay(null);
 }
 $('btn-play-again').addEventListener('click',     resetAndGoHome);
 $('btn-play-again-won').addEventListener('click', resetAndGoHome);
+$('btn-exit-level').addEventListener('click', () => {
+  if (!confirm('Exit to main menu? You will leave the game.')) return;
+  resetAndGoHome();
+});
 $('chat-send').addEventListener('click', sendChat);
 $('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
